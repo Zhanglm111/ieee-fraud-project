@@ -56,12 +56,12 @@ def compute_iv_table(
         iv, detail = calculate_woe_iv_from_binned(tmp, feature, target)
         rows.append({"Feature": feature, "IV": iv})
         details[feature] = detail
-    return pd.DataFrame(rows).sort_values("IV", ascending=False), details
+    return pd.DataFrame(rows).sort_values("IV", ascending=False).reset_index(drop=True), details
 
 
-def select_features(iv_table: pd.DataFrame, selection: str, min_iv: float | None, max_iv: float | None) -> list[str]:
+def select_features(iv_table: pd.DataFrame, candidate_features: list[str], selection: str, min_iv: float | None, max_iv: float | None) -> list[str]:
     if selection == "all":
-        return iv_table["Feature"].tolist()
+        return list(candidate_features)
     mask = pd.Series(True, index=iv_table.index)
     if min_iv is not None:
         mask &= iv_table["IV"] >= min_iv
@@ -79,7 +79,7 @@ class WOEEncoder:
         for feature in features:
             rule = self.rules[feature]
             if rule["kind"] == "numeric":
-                binned = pd.cut(data[feature], bins=rule["bins"], include_lowest=True).astype(str)
+                binned = pd.cut(data[feature], bins=rule["bins"], include_lowest=True).astype(str).fillna("__MISSING__")
             else:
                 values = data[feature].astype("object").fillna("__MISSING__")
                 binned = values.where(values.isin(rule["levels"]), "__OTHER__").astype(str)
@@ -104,11 +104,20 @@ def fit_woe_encoder(
             levels = sorted(set(binned.unique()) - {"__OTHER__"})
             bins_rule = None
         else:
-            _, bins_edges = pd.qcut(train[feature], q=bins, duplicates="drop", retbins=True)
-            binned = pd.cut(train[feature], bins=bins_edges, include_lowest=True).astype(str).fillna("__MISSING__")
+            series = train[feature]
+            if series.nunique(dropna=True) <= 1:
+                binned = pd.Series("__single__", index=train.index)
+                bins_rule = np.array([-np.inf, np.inf])
+            else:
+                try:
+                    _, bins_rule = pd.qcut(series, q=bins, duplicates="drop", retbins=True)
+                except ValueError:
+                    _, bins_rule = pd.cut(series, bins=bins, duplicates="drop", retbins=True)
+                bins_rule[0] = -np.inf
+                bins_rule[-1] = np.inf
+                binned = pd.cut(series, bins=bins_rule, include_lowest=True).astype(str).fillna("__MISSING__")
             kind = "numeric"
             levels = None
-            bins_rule = bins_edges
         tmp = pd.DataFrame({feature: binned, target: train[target]})
         _, detail = calculate_woe_iv_from_binned(tmp, feature, target)
         woe = dict(zip(detail[feature].astype(str), detail["WOE"]))

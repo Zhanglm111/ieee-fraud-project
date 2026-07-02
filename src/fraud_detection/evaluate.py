@@ -27,8 +27,7 @@ def find_best_threshold(y_true, y_score) -> float:
     f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-12)
     if len(thresholds) == 0:
         return 0.5
-    best = int(np.nanargmax(f1[:-1]))
-    return float(thresholds[best])
+    return float(thresholds[int(np.nanargmax(f1[:-1]))])
 
 
 def classification_metrics(y_true, y_score, threshold: float) -> dict:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-import numpy as np
 import pandas as pd
 
 
@@ -19,36 +18,36 @@ def get_base_feature_name(feature: str) -> str:
 def infer_feature_category(feature: str) -> str:
     base = get_base_feature_name(feature)
     if base in {"TransactionDT", "relative_day", "hour", "TransactionAmt", "TransactionAmt_log", "ProductCD"}:
-        return "transaction_context"
+        return "交易基础特征"
     if re.match(r"^card[1-6]$", base) or base in {"addr1", "addr2", "P_emaildomain", "R_emaildomain"}:
-        return "payment_identity"
+        return "支付工具与身份代理特征"
     if re.match(r"^C\d+$", base):
-        return "count_aggregation"
+        return "行为计数统计特征"
     if re.match(r"^D\d+$", base):
-        return "time_delta"
+        return "行为时间差特征"
     if re.match(r"^M\d+$", base):
-        return "identity_match"
+        return "身份匹配一致性特征"
     if re.match(r"^V\d+$", base):
-        return "vesta_aggregation"
+        return "Vesta聚合统计特征"
     if base.startswith("id_") or base in {"DeviceType", "DeviceInfo"}:
-        return "device_fingerprint"
+        return "设备网络与数字指纹特征"
     if base in {"dist1", "dist2"}:
-        return "behavior_drift"
-    return "other"
+        return "行为漂移距离特征"
+    return "其他特征"
 
 
 def infer_risk_mechanism(feature: str) -> str:
     category = infer_feature_category(feature)
     return {
-        "transaction_context": "transaction_context_anomaly",
-        "payment_identity": "payment_identity_anomaly",
-        "count_aggregation": "entity_aggregation_anomaly",
-        "vesta_aggregation": "entity_aggregation_anomaly",
-        "time_delta": "behavior_timing_anomaly",
-        "identity_match": "identity_consistency_anomaly",
-        "device_fingerprint": "device_network_fingerprint_anomaly",
-        "behavior_drift": "behavior_drift_anomaly",
-    }.get(category, "other_risk_signal")
+        "交易基础特征": "交易场景异常",
+        "支付工具与身份代理特征": "支付身份与联系方式异常",
+        "行为计数统计特征": "批量聚集与实体关联异常",
+        "Vesta聚合统计特征": "批量聚集与实体关联异常",
+        "行为时间差特征": "行为时序节奏异常",
+        "身份匹配一致性特征": "身份一致性异常",
+        "设备网络与数字指纹特征": "设备网络与数字指纹异常",
+        "行为漂移距离特征": "行为漂移异常",
+    }.get(category, "其他风险信号")
 
 
 def build_feature_system(df: pd.DataFrame, target: str = TARGET) -> pd.DataFrame:
@@ -59,6 +58,7 @@ def build_feature_system(df: pd.DataFrame, target: str = TARGET) -> pd.DataFrame
         rows.append(
             {
                 "Feature": feature,
+                "BaseFeature": get_base_feature_name(feature),
                 "FeatureCategory": infer_feature_category(feature),
                 "RiskMechanism": infer_risk_mechanism(feature),
                 "MissingRate": float(df[feature].isna().mean()),
@@ -104,7 +104,7 @@ def categorical_features(features: list[str]) -> list[str]:
             base in {"ProductCD", "addr1", "addr2", "P_emaildomain", "R_emaildomain", "DeviceType", "DeviceInfo"}
             or re.match(r"^card[1-6]$", base)
             or re.match(r"^M\d+$", base)
-            or base.startswith("id_")
+            or (base.startswith("id_") and base != "id_02")
         ):
             cats.append(col)
     return cats
@@ -117,7 +117,7 @@ def prepare_tree_matrices(
     features: list[str],
     target: str = TARGET,
     force_categorical: list[str] | None = None,
-) -> dict[str, pd.DataFrame | pd.Series | pd.DataFrame]:
+) -> dict:
     force_categorical = set(force_categorical or [])
     X_train = train[features].copy()
     X_valid = valid[features].copy()
@@ -126,7 +126,8 @@ def prepare_tree_matrices(
     y_valid = valid[target].astype(int)
     y_test = test[target].astype(int)
 
-    category_mappings: dict[str, dict] = {}
+    fill_values = {}
+    category_mappings = {}
     for col in features:
         if col in force_categorical or X_train[col].dtype == "object":
             X_train[col] = X_train[col].astype("object").fillna("__MISSING__")
@@ -140,6 +141,7 @@ def prepare_tree_matrices(
             X_test[col] = X_test[col].map(mapping).fillna(-1).astype("int32")
         else:
             median = X_train[col].median()
+            fill_values[col] = median
             X_train[col] = X_train[col].fillna(median)
             X_valid[col] = X_valid[col].fillna(median)
             X_test[col] = X_test[col].fillna(median)
@@ -163,5 +165,6 @@ def prepare_tree_matrices(
         "y_valid": y_valid,
         "y_test": y_test,
         "feature_info": feature_info,
+        "fill_values": fill_values,
         "category_mappings": category_mappings,
     }

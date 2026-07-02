@@ -19,17 +19,17 @@ data:
 
 features:
   high_missing_threshold: 0.95
-  categorical_max_levels: 50
   numeric_bins: 10
+  categorical_max_levels: 30
   add_missing_indicators: true
   add_time_features: true
   add_amount_log: true
 
 iv:
   bins: 10
+  max_categories: 30
   min_iv: 0.02
   max_iv: 0.50
-  correlation_threshold: 0.80
 
 training:
   schemes:
@@ -54,11 +54,50 @@ training:
       min_iv:
       max_iv:
 
+models:
+  woe_lr:
+    enabled: true
+    params:
+      C: 0.1
+      solver: liblinear
+      max_iter: 1000
+      class_weight: balanced
+    preprocessing:
+      near_zero_variance_threshold: 0.0
+      correlation_threshold: 0.80
+  random_forest:
+    enabled: true
+    params:
+      n_estimators: 200
+      max_depth: 8
+      min_samples_leaf: 50
+      class_weight: balanced
+      n_jobs: -1
+  xgboost:
+    enabled: true
+    params:
+      n_estimators: 2000
+      max_depth: 4
+      learning_rate: 0.03
+      subsample: 0.7
+      colsample_bytree: 0.7
+      min_child_weight: 10
+      gamma: 0.2
+      reg_alpha: 0.5
+      reg_lambda: 5.0
+      objective: binary:logistic
+      eval_metric: aucpr
+      tree_method: hist
+      n_jobs: -1
+    early_stopping_rounds: 100
+
 evaluation:
   top_rates: [0.01, 0.03, 0.05, 0.10]
   threshold_metric: f1
 
 explain:
+  experiment: iv_002_050
+  model: xgboost
   sample_size: 5000
   max_display: 30
   cache_sample_index: true

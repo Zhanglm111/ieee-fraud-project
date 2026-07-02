@@ -43,7 +43,8 @@ def shap_importance_table(
     X: pd.DataFrame,
     values: np.ndarray,
     feature_info: pd.DataFrame | None = None,
-) -> pd.DataFrame:
+    y: pd.Series | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     result = pd.DataFrame(
         {
             "Feature": X.columns,
@@ -57,7 +58,44 @@ def shap_importance_table(
     result["SHAPShare"] = result["MeanAbsSHAP"] / result["MeanAbsSHAP"].sum()
     if feature_info is not None:
         result = result.merge(feature_info, on="Feature", how="left")
-    return result
+    fraud_normal = None
+    if y is not None:
+        fraud_mask = (y == 1).values
+        normal_mask = (y == 0).values
+        fraud_normal = pd.DataFrame(
+            {
+                "Feature": X.columns,
+                "FraudMeanSHAP": values[fraud_mask].mean(axis=0),
+                "NormalMeanSHAP": values[normal_mask].mean(axis=0),
+                "FraudMeanAbsSHAP": np.abs(values[fraud_mask]).mean(axis=0),
+                "NormalMeanAbsSHAP": np.abs(values[normal_mask]).mean(axis=0),
+            }
+        )
+        fraud_normal["SHAPDifference_FraudMinusNormal"] = (
+            fraud_normal["FraudMeanSHAP"] - fraud_normal["NormalMeanSHAP"]
+        )
+        if feature_info is not None:
+            fraud_normal = fraud_normal.merge(feature_info, on="Feature", how="left")
+        fraud_normal = fraud_normal.sort_values("SHAPDifference_FraudMinusNormal", ascending=False)
+    return result, fraud_normal
+
+
+def mechanism_summary(importance: pd.DataFrame) -> pd.DataFrame:
+    if "RiskMechanism" not in importance.columns:
+        return pd.DataFrame()
+    summary = (
+        importance.groupby("RiskMechanism")
+        .agg(
+            FeatureCount=("Feature", "count"),
+            TotalMeanAbsSHAP=("MeanAbsSHAP", "sum"),
+            AvgMeanAbsSHAP=("MeanAbsSHAP", "mean"),
+            AvgMeanSHAP=("MeanSHAP", "mean"),
+            AvgPositiveSHAPRate=("PositiveSHAPRate", "mean"),
+        )
+        .sort_values("TotalMeanAbsSHAP", ascending=False)
+    )
+    summary["SHAPShare"] = summary["TotalMeanAbsSHAP"] / summary["TotalMeanAbsSHAP"].sum()
+    return summary.reset_index()
 
 
 def save_summary_plot(values, X: pd.DataFrame, path: str | Path, max_display: int = 30) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -10,12 +11,13 @@ from . import features as feature_mod
 from . import iv as iv_mod
 from . import models as model_mod
 from .evaluate import classification_metrics, find_best_threshold, topk_evaluation
-from .utils import ensure_dir, save_json
+from .preprocessing import correlation_filter, near_zero_variance_filter
+from .utils import ensure_dir, resolve_path, save_json
 
 
 def load_processed_splits(config: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     data_cfg = config["data"]
-    processed_dir = Path(data_cfg["processed_dir"])
+    processed_dir = resolve_path(data_cfg["processed_dir"])
     stem = data_cfg.get("output_name", "ieee_train_time_split")
     paths = [
         processed_dir / f"{stem}_train.parquet",
@@ -27,8 +29,11 @@ def load_processed_splits(config: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.
     return tuple(pd.read_parquet(path) for path in paths)
 
 
-def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
-    output_dir = ensure_dir(output_dir)
+def enabled_models(config: dict) -> dict:
+    return {name: cfg for name, cfg in config.get("models", {}).items() if cfg.get("enabled", False)}
+
+
+def prepare_base_features(config: dict):
     train, valid, test = load_processed_splits(config)
     target = config["project"].get("target", "isFraud")
     all_features = feature_mod.candidate_features(train, target)
@@ -39,85 +44,227 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
         all_features,
         config["features"].get("high_missing_threshold", 0.95),
     )
-    categories = feature_mod.categorical_features(iv_features)
-    iv_table, _ = iv_mod.compute_iv_table(
+    force_categorical = feature_mod.categorical_features(iv_features)
+    risk_system = feature_mod.build_feature_system(train, target)
+    return train, valid, test, iv_features, force_categorical, risk_system
+
+
+def prepare_woe_lr_matrices(config: dict, train, valid, test, selected_features, force_categorical):
+    target = config["project"].get("target", "isFraud")
+    encoder = iv_mod.fit_woe_encoder(
         train,
-        iv_features,
-        categories,
+        selected_features,
+        [f for f in force_categorical if f in selected_features],
         target=target,
         bins=config["iv"].get("bins", 10),
+        max_categories=config["iv"].get("max_categories", 30),
+    )
+    X_train = encoder.transform(train, selected_features)
+    X_valid = encoder.transform(valid, selected_features)
+    X_test = encoder.transform(test, selected_features)
+    model_cfg = config["models"].get("woe_lr", {})
+    prep_cfg = model_cfg.get("preprocessing", {})
+    kept, selector = near_zero_variance_filter(X_train, prep_cfg.get("near_zero_variance_threshold", 0.0))
+    X_train = X_train[kept]
+    X_valid = X_valid[kept]
+    X_test = X_test[kept]
+    kept = correlation_filter(X_train, prep_cfg.get("correlation_threshold", 0.8))
+    X_train = X_train[kept]
+    X_valid = X_valid[kept]
+    X_test = X_test[kept]
+    return {
+        "X_train": X_train,
+        "X_valid": X_valid,
+        "X_test": X_test,
+        "y_train": train[target].astype(int),
+        "y_valid": valid[target].astype(int),
+        "y_test": test[target].astype(int),
+        "encoder": encoder,
+        "features": kept,
+    }
+
+
+def predict_score(model, X: pd.DataFrame) -> pd.Series:
+    return pd.Series(model.predict_proba(X)[:, 1], index=X.index)
+
+
+def evaluate_model(model, scheme_name: str, model_name: str, matrices: dict, threshold: float, top_rates):
+    metrics_rows = []
+    topk_rows = []
+    prediction_frames = []
+    for split, X, y in [
+        ("Train", matrices["X_train"], matrices["y_train"]),
+        ("Valid", matrices["X_valid"], matrices["y_valid"]),
+        ("Test", matrices["X_test"], matrices["y_test"]),
+    ]:
+        score = predict_score(model, X)
+        metrics = classification_metrics(y, score, threshold)
+        metrics.update({"Scheme": scheme_name, "Model": model_name, "Split": split})
+        metrics_rows.append(metrics)
+        topk = topk_evaluation(y, score, top_rates)
+        topk["Scheme"] = scheme_name
+        topk["Model"] = model_name
+        topk["Split"] = split
+        topk_rows.append(topk)
+        prediction_frames.append(
+            pd.DataFrame({"Scheme": scheme_name, "Model": model_name, "Split": split, "y_true": y, "score": score})
+        )
+    return metrics_rows, pd.concat(topk_rows, ignore_index=True), pd.concat(prediction_frames, ignore_index=True)
+
+
+def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
+    output_dir = ensure_dir(resolve_path(output_dir))
+    for sub in ["tables", "iv", "models", "metrics", "predictions", "logs"]:
+        ensure_dir(output_dir / sub)
+    train, valid, test, iv_features, force_categorical, risk_system = prepare_base_features(config)
+    target = config["project"].get("target", "isFraud")
+    risk_system.to_csv(output_dir / "tables" / "risk_feature_system.csv", index=False, encoding="utf-8-sig")
+    iv_table, iv_details = iv_mod.compute_iv_table(
+        train,
+        iv_features,
+        force_categorical,
+        target=target,
+        bins=config["iv"].get("bins", 10),
+        max_categories=config["iv"].get("max_categories", 30),
+    )
+    iv_table = iv_table.merge(
+        risk_system[["Feature", "FeatureCategory", "RiskMechanism"]],
+        on="Feature",
+        how="left",
     )
     iv_table.to_csv(output_dir / "iv" / "iv_summary.csv", index=False, encoding="utf-8-sig")
+    iv_table.to_csv(output_dir / "tables" / "iv_summary.csv", index=False, encoding="utf-8-sig")
 
+    all_metric_rows = []
+    all_topk = []
+    all_predictions = []
+    scheme_rows = []
     for scheme in config["training"]["schemes"]:
-        scheme_dir = ensure_dir(output_dir / scheme["name"])
-        selected = feature_mod.candidate_features(train, target) if scheme["selection"] == "all" else iv_mod.select_features(
-            iv_table, scheme["selection"], scheme.get("min_iv"), scheme.get("max_iv")
+        scheme_name = scheme["name"]
+        scheme_dir = ensure_dir(output_dir / scheme_name)
+        for sub in ["models", "tables", "metrics", "predictions", "shap"]:
+            ensure_dir(scheme_dir / sub)
+        selected = iv_mod.select_features(
+            iv_table,
+            iv_features,
+            scheme["selection"],
+            scheme.get("min_iv"),
+            scheme.get("max_iv"),
         )
-        pd.DataFrame({"Feature": selected}).to_csv(
-            scheme_dir / "selected_features.csv", index=False, encoding="utf-8-sig"
+        pd.DataFrame({"Feature": selected}).to_csv(scheme_dir / "tables" / "selected_features.csv", index=False, encoding="utf-8-sig")
+        tree = feature_mod.prepare_tree_matrices(train, valid, test, selected, target, [f for f in force_categorical if f in selected])
+        tree["feature_info"].to_csv(scheme_dir / "tables" / "model_feature_info.csv", index=False, encoding="utf-8-sig")
+        model_mod.save_model(
+            {
+                "fill_values": tree["fill_values"],
+                "category_mappings": tree["category_mappings"],
+                "feature_info": tree["feature_info"],
+            },
+            scheme_dir / "models" / "tree_preprocess.joblib",
         )
-        tree = feature_mod.prepare_tree_matrices(train, valid, test, selected, target, categories)
-        tree["feature_info"].to_csv(scheme_dir / "feature_info.csv", index=False, encoding="utf-8-sig")
-        model_name = config["model"]["name"]
-        params = config["model"].get("params", {})
-        model = model_mod.make_model(model_name, params, config["project"].get("random_state", 42))
-        if model_name == "xgboost":
-            model.fit(
-                tree["X_train"],
-                tree["y_train"],
-                eval_set=[(tree["X_valid"], tree["y_valid"])],
-                verbose=False,
+        woe_data = None
+        if config["models"].get("woe_lr", {}).get("enabled", False):
+            woe_data = prepare_woe_lr_matrices(config, train, valid, test, selected, force_categorical)
+            pd.DataFrame({"Feature": woe_data["features"]}).to_csv(
+                scheme_dir / "tables" / "woe_feature_info.csv", index=False, encoding="utf-8-sig"
             )
-        else:
-            model.fit(tree["X_train"], tree["y_train"])
-        model_mod.save_model(model, scheme_dir / "model.joblib")
-        save_json({"scheme": scheme, "model": model_name, "selected_feature_count": len(selected)}, scheme_dir / "run_config.json")
+            model_mod.save_model(
+                {"encoder": woe_data["encoder"], "features": woe_data["features"]},
+                scheme_dir / "models" / "woe_preprocess.joblib",
+            )
+
+        scheme_rows.append(
+            {
+                "Scheme": scheme_name,
+                "Label": scheme.get("label", scheme_name),
+                "CandidateFeatureCount": len(iv_features),
+                "SelectedFeatureCount": len(selected),
+                "WOEFeatureCount": len(woe_data["features"]) if woe_data is not None else 0,
+            }
+        )
+
+        for model_name, model_cfg in enabled_models(config).items():
+            matrices = woe_data if model_name == "woe_lr" else tree
+            if matrices is None:
+                continue
+            params = model_cfg.get("params", {})
+            model = model_mod.make_model(model_name, params, config["project"].get("random_state", 42))
+            if model_name == "xgboost":
+                model_mod.fit_xgboost(
+                    model,
+                    matrices["X_train"],
+                    matrices["y_train"],
+                    matrices["X_valid"],
+                    matrices["y_valid"],
+                    model_cfg.get("early_stopping_rounds"),
+                )
+            else:
+                model.fit(matrices["X_train"], matrices["y_train"])
+            model_mod.save_model(model, scheme_dir / "models" / f"{model_name}.joblib")
+            valid_score = predict_score(model, matrices["X_valid"])
+            threshold = find_best_threshold(matrices["y_valid"], valid_score)
+            metric_rows, topk, preds = evaluate_model(
+                model,
+                scheme_name,
+                model_name,
+                matrices,
+                threshold,
+                config["evaluation"].get("top_rates", [0.01, 0.03, 0.05, 0.10]),
+            )
+            all_metric_rows.extend(metric_rows)
+            all_topk.append(topk)
+            all_predictions.append(preds)
+            pd.DataFrame(metric_rows).to_csv(
+                scheme_dir / "metrics" / f"{model_name}_metrics.csv", index=False, encoding="utf-8-sig"
+            )
+            topk.to_csv(scheme_dir / "metrics" / f"{model_name}_topk.csv", index=False, encoding="utf-8-sig")
+            preds.to_csv(scheme_dir / "predictions" / f"{model_name}_predictions.csv", index=False, encoding="utf-8-sig")
+            save_json(
+                {"scheme": scheme, "model": model_name, "threshold": threshold, "params": params},
+                scheme_dir / "models" / f"{model_name}_run_config.json",
+            )
+
+    pd.DataFrame(scheme_rows).to_csv(output_dir / "tables" / "experiment_scheme_summary.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(all_metric_rows).to_csv(output_dir / "tables" / "all_metrics_train_valid_test.csv", index=False, encoding="utf-8-sig")
+    if all_topk:
+        pd.concat(all_topk, ignore_index=True).to_csv(output_dir / "tables" / "all_topk_train_valid_test_with_lift.csv", index=False, encoding="utf-8-sig")
+    if all_predictions:
+        pd.concat(all_predictions, ignore_index=True).to_csv(output_dir / "predictions" / "all_predictions.csv", index=False, encoding="utf-8-sig")
 
 
 def run_evaluation(config: dict, experiment: str, output_dir: str | Path = "outputs") -> None:
-    output_dir = Path(output_dir)
-    train, valid, test = load_processed_splits(config)
-    target = config["project"].get("target", "isFraud")
-    selected = pd.read_csv(output_dir / experiment / "selected_features.csv")["Feature"].tolist()
-    categories = feature_mod.categorical_features(selected)
-    tree = feature_mod.prepare_tree_matrices(train, valid, test, selected, target, categories)
-    model = model_mod.load_model(output_dir / experiment / "model.joblib")
-    valid_score = model.predict_proba(tree["X_valid"])[:, 1]
-    threshold = find_best_threshold(tree["y_valid"], valid_score)
-    rows = []
-    for split, X, y in [
-        ("train", tree["X_train"], tree["y_train"]),
-        ("valid", tree["X_valid"], tree["y_valid"]),
-        ("test", tree["X_test"], tree["y_test"]),
-    ]:
-        score = model.predict_proba(X)[:, 1]
-        metric = classification_metrics(y, score, threshold)
-        metric.update({"Split": split, "Experiment": experiment})
-        rows.append(metric)
-        topk_evaluation(y, score, config["evaluation"].get("top_rates", [0.01, 0.03, 0.05, 0.10])).to_csv(
-            output_dir / experiment / f"topk_{split}.csv", index=False, encoding="utf-8-sig"
-        )
-    pd.DataFrame(rows).to_csv(output_dir / experiment / "metrics.csv", index=False, encoding="utf-8-sig")
+    output_dir = resolve_path(output_dir)
+    metrics_path = output_dir / "tables" / "all_metrics_train_valid_test.csv"
+    if not metrics_path.exists():
+        raise FileNotFoundError("Run scripts/train.py before evaluate.py.")
+    metrics = pd.read_csv(metrics_path)
+    subset = metrics[metrics["Scheme"] == experiment]
+    ensure_dir(output_dir / experiment / "metrics")
+    subset.to_csv(output_dir / experiment / "metrics" / "metrics_summary.csv", index=False, encoding="utf-8-sig")
 
 
 def run_explain(config: dict, experiment: str, output_dir: str | Path = "outputs") -> None:
-    output_dir = Path(output_dir)
-    train, valid, test = load_processed_splits(config)
+    output_dir = resolve_path(output_dir)
+    train, valid, test, iv_features, force_categorical, _risk_system = prepare_base_features(config)
     target = config["project"].get("target", "isFraud")
-    selected = pd.read_csv(output_dir / experiment / "selected_features.csv")["Feature"].tolist()
-    categories = feature_mod.categorical_features(selected)
-    tree = feature_mod.prepare_tree_matrices(train, valid, test, selected, target, categories)
-    model = model_mod.load_model(output_dir / experiment / "model.joblib")
+    selected = pd.read_csv(output_dir / experiment / "tables" / "selected_features.csv")["Feature"].tolist()
+    feature_info = pd.read_csv(output_dir / experiment / "tables" / "model_feature_info.csv")
+    tree = feature_mod.prepare_tree_matrices(train, valid, test, selected, target, [f for f in force_categorical if f in selected])
+    model_name = config["explain"].get("model", "xgboost")
+    model = model_mod.load_model(output_dir / experiment / "models" / f"{model_name}.joblib")
     shap_dir = ensure_dir(output_dir / experiment / "shap")
     sample = explain_mod.sample_for_shap(
         tree["X_test"],
         config["explain"].get("sample_size", 5000),
         config["project"].get("random_state", 42),
-        output_dir / "shap_sample_indices.csv",
+        output_dir / "tables" / "shap_sample_indices.csv",
     )
+    y_sample = tree["y_test"].loc[sample.index]
     values = explain_mod.compute_tree_shap(model, sample)
-    importance = explain_mod.shap_importance_table(sample, values, tree["feature_info"])
+    importance, fraud_normal = explain_mod.shap_importance_table(sample, values, feature_info, y_sample)
     importance.to_csv(shap_dir / "shap_importance.csv", index=False, encoding="utf-8-sig")
+    explain_mod.mechanism_summary(importance).to_csv(shap_dir / "shap_mechanism_summary.csv", index=False, encoding="utf-8-sig")
+    if fraud_normal is not None:
+        fraud_normal.to_csv(shap_dir / "fraud_normal_shap_compare.csv", index=False, encoding="utf-8-sig")
     explain_mod.save_bar_plot(importance, shap_dir / "shap_importance_top30.png", config["explain"].get("max_display", 30))
     explain_mod.save_summary_plot(values, sample, shap_dir / "shap_summary_top30.png", config["explain"].get("max_display", 30))

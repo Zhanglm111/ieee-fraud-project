@@ -1,11 +1,8 @@
 extends: base.yaml
-model:
-  name: woe_lr
-  params:
-    C: 0.1
-    solver: liblinear
-    max_iter: 1000
-    class_weight: balanced
-  preprocessing:
-    near_zero_variance_threshold: 0.0
-    correlation_threshold: 0.80
+models:
+  woe_lr:
+    enabled: true
+  random_forest:
+    enabled: false
+  xgboost:
+    enabled: false
