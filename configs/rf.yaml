@@ -1,0 +1,9 @@
+extends: base.yaml
+model:
+  name: random_forest
+  params:
+    n_estimators: 200
+    max_depth: 8
+    min_samples_leaf: 50
+    class_weight: balanced
+    n_jobs: -1

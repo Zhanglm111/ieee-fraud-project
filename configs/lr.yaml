@@ -1,0 +1,8 @@
+extends: base.yaml
+model:
+  name: lr
+  params:
+    C: 0.1
+    solver: liblinear
+    max_iter: 1000
+    class_weight: balanced
