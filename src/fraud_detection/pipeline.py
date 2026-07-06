@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+import sys
 
 import pandas as pd
 
@@ -13,6 +15,28 @@ from . import models as model_mod
 from .evaluate import classification_metrics, find_best_threshold, topk_evaluation
 from .preprocessing import correlation_filter, near_zero_variance_filter
 from .utils import ensure_dir, resolve_path, save_json
+
+
+def configure_training_logger(output_dir: Path) -> logging.Logger:
+    logger = logging.getLogger("fraud_detection.training")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    file_handler = logging.FileHandler(output_dir / "logs" / "training.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
 
 
 def load_processed_splits(config: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -116,9 +140,22 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
     output_dir = ensure_dir(resolve_path(output_dir))
     for sub in ["tables", "iv", "models", "metrics", "predictions", "logs"]:
         ensure_dir(output_dir / sub)
+    logger = configure_training_logger(output_dir)
+    logger.info("Training started. output_dir=%s", output_dir)
+    logger.info("Preparing data splits and base feature system.")
     train, valid, test, iv_features, force_categorical, risk_system = prepare_base_features(config)
     target = config["project"].get("target", "isFraud")
+    logger.info(
+        "Data ready. train=%d, valid=%d, test=%d, candidate_features=%d, categorical_features=%d",
+        len(train),
+        len(valid),
+        len(test),
+        len(iv_features),
+        len(force_categorical),
+    )
     risk_system.to_csv(output_dir / "tables" / "risk_feature_system.csv", index=False, encoding="utf-8-sig")
+    logger.info("Saved risk feature system: %s", output_dir / "tables" / "risk_feature_system.csv")
+    logger.info("Computing IV table.")
     iv_table, iv_details = iv_mod.compute_iv_table(
         train,
         iv_features,
@@ -134,6 +171,7 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
     )
     iv_table.to_csv(output_dir / "iv" / "iv_summary.csv", index=False, encoding="utf-8-sig")
     iv_table.to_csv(output_dir / "tables" / "iv_summary.csv", index=False, encoding="utf-8-sig")
+    logger.info("Saved IV table with %d rows.", len(iv_table))
 
     all_metric_rows = []
     all_topk = []
@@ -141,6 +179,7 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
     scheme_rows = []
     for scheme in config["training"]["schemes"]:
         scheme_name = scheme["name"]
+        logger.info("Scheme started: %s", scheme_name)
         scheme_dir = ensure_dir(output_dir / scheme_name)
         for sub in ["models", "tables", "metrics", "predictions", "shap"]:
             ensure_dir(scheme_dir / sub)
@@ -151,7 +190,9 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
             scheme.get("min_iv"),
             scheme.get("max_iv"),
         )
+        logger.info("Scheme %s selected %d features.", scheme_name, len(selected))
         pd.DataFrame({"Feature": selected}).to_csv(scheme_dir / "tables" / "selected_features.csv", index=False, encoding="utf-8-sig")
+        logger.info("Scheme %s preparing tree model matrices.", scheme_name)
         tree = feature_mod.prepare_tree_matrices(train, valid, test, selected, target, [f for f in force_categorical if f in selected])
         tree["feature_info"].to_csv(scheme_dir / "tables" / "model_feature_info.csv", index=False, encoding="utf-8-sig")
         model_mod.save_model(
@@ -164,6 +205,7 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
         )
         woe_data = None
         if config["models"].get("woe_lr", {}).get("enabled", False):
+            logger.info("Scheme %s preparing WOE-LR matrices.", scheme_name)
             woe_data = prepare_woe_lr_matrices(config, train, valid, test, selected, force_categorical)
             pd.DataFrame({"Feature": woe_data["features"]}).to_csv(
                 scheme_dir / "tables" / "woe_feature_info.csv", index=False, encoding="utf-8-sig"
@@ -189,6 +231,7 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
                 continue
             params = model_cfg.get("params", {})
             model = model_mod.make_model(model_name, params, config["project"].get("random_state", 42))
+            logger.info("Scheme %s model %s training started.", scheme_name, model_name)
             if model_name == "xgboost":
                 model_mod.fit_xgboost(
                     model,
@@ -200,7 +243,9 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
                 )
             else:
                 model.fit(matrices["X_train"], matrices["y_train"])
+            logger.info("Scheme %s model %s training finished.", scheme_name, model_name)
             model_mod.save_model(model, scheme_dir / "models" / f"{model_name}.joblib")
+            logger.info("Scheme %s model %s evaluating.", scheme_name, model_name)
             valid_score = predict_score(model, matrices["X_valid"])
             threshold = find_best_threshold(matrices["y_valid"], valid_score)
             metric_rows, topk, preds = evaluate_model(
@@ -223,6 +268,8 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
                 {"scheme": scheme, "model": model_name, "threshold": threshold, "params": params},
                 scheme_dir / "models" / f"{model_name}_run_config.json",
             )
+            logger.info("Scheme %s model %s saved. threshold=%.6f", scheme_name, model_name, threshold)
+        logger.info("Scheme finished: %s", scheme_name)
 
     pd.DataFrame(scheme_rows).to_csv(output_dir / "tables" / "experiment_scheme_summary.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(all_metric_rows).to_csv(output_dir / "tables" / "all_metrics_train_valid_test.csv", index=False, encoding="utf-8-sig")
@@ -230,6 +277,7 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
         pd.concat(all_topk, ignore_index=True).to_csv(output_dir / "tables" / "all_topk_train_valid_test_with_lift.csv", index=False, encoding="utf-8-sig")
     if all_predictions:
         pd.concat(all_predictions, ignore_index=True).to_csv(output_dir / "predictions" / "all_predictions.csv", index=False, encoding="utf-8-sig")
+    logger.info("Training finished. schemes=%d, metric_rows=%d", len(scheme_rows), len(all_metric_rows))
 
 
 def run_evaluation(config: dict, experiment: str, output_dir: str | Path = "outputs") -> None:

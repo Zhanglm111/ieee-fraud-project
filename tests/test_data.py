@@ -11,7 +11,8 @@ def test_add_basic_columns():
 
 def test_split_by_time():
     df = pd.DataFrame({"TransactionDT": range(100), "isFraud": [0] * 100})
-    train, valid, test = split_by_time(df)
+    train, valid, test, profile = split_by_time(df)
     assert len(train) == 70
     assert len(valid) == 15
     assert len(test) == 15
+    assert len(profile) == 3
