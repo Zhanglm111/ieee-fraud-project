@@ -1,17 +1,19 @@
-# 原始数据目录
+# 原始交易数据目录
 
-请将 Kaggle IEEE-CIS Fraud Detection 数据集的原始 CSV 文件放在：
+本目录用于存放在线交易欺诈风险建模所需的原始 CSV 数据文件。
+
+项目当前实验使用 IEEE-CIS Fraud Detection 数据格式。请将原始文件放在：
 
 ```text
 data/raw/ieee-fraud-detection/
 ```
 
-训练流程至少需要：
+流程至少需要：
 
 - `train_transaction.csv`
 - `train_identity.csv`
 
-如果需要使用官方测试集，也可以放入（但是测试集暂无标签）：
+如果需要使用官方测试集，也可以放入（但是测试集无标签）：
 
 - `test_transaction.csv`
 - `test_identity.csv`

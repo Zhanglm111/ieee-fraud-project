@@ -1,8 +1,93 @@
-# IEEE-CIS 互联网交易欺诈识别项目
+# 在线交易欺诈风险建模工程
 
-本项目将 IEEE-CIS Fraud Detection 数据集上的欺诈识别研究流程整理为可复现的工程化项目，包含数据处理、特征工程、WOE-IV 分析、模型训练、评估、SHAP 可解释性分析和 Notebook 展示。
+本项目面向 **Online Transaction Fraud Risk Modeling** 场景，构建一套可复现、模块化、可解释的交易欺诈识别流程。项目重点不是单一 Notebook 实验，而是将数据处理、风险特征体系、WOE-IV 特征筛选、模型训练、评估与 SHAP 解释整合为一条工程化流水线。
+
+项目当前使用 IEEE-CIS Fraud Detection 数据作为实验数据来源，用于模拟在线交易中的欺诈风险识别任务。
+
+## 项目目标
+
+- 构建面向在线交易场景的风险特征体系。
+- 使用 WOE-IV 方法进行特征筛选与风险信号识别。
+- 训练 WOE-LR、Random Forest、XGBoost 等模型，并比较不同特征方案的效果。
+- 通过 AUC、PR-AUC、KS、F1、TopK Lift 等指标评估模型表现。
+- 使用 TreeSHAP 分析模型判断依据，形成可解释的风险机制结论。
+- 将研究流程工程化，支持脚本化复现、配置化实验和 Notebook 展示。
+
+## 风险建模思路
+
+本项目将原始交易字段组织为风险特征体系，再通过 IV、模型表现和 SHAP 解释分析风险信号与欺诈预测之间的关系。
+
+```mermaid
+flowchart TD
+    A[Online Transaction Data<br/>在线交易数据] --> B[Risk Features<br/>风险特征体系]
+
+    B --> C1[交易基础特征<br/>金额 / 时间 / 商品类型]
+    B --> C2[身份与支付代理特征<br/>银行卡 / 地址 / 邮箱]
+    B --> C3[设备与网络指纹特征<br/>设备 / 浏览器 / 身份字段]
+    B --> C4[行为统计与时序特征<br/>计数 / 时间差 / 聚合统计]
+
+    C1 --> D[Risk Mechanism<br/>风险机制归纳]
+    C2 --> D
+    C3 --> D
+    C4 --> D
+
+    D --> E[WOE-IV Feature Selection<br/>特征筛选]
+    E --> F[Fraud Prediction<br/>欺诈预测]
+    F --> G[Evaluation & SHAP Explanation<br/>评估与可解释性分析]
+```
+
+在代码中，风险体系主要体现在：
+
+- `FeatureCategory`：特征类别，例如交易基础特征、身份代理特征、设备网络特征、行为统计特征。
+- `RiskMechanism`：风险机制，例如交易场景异常、身份一致性异常、设备网络异常、批量聚集异常。
+
+相关逻辑位于：
+
+```text
+src/fraud_detection/features.py
+```
+
+## 工程化设计
+
+本项目采用模块化和配置化组织方式，便于复现实验、扩展模型和追踪结果。
+
+```text
+ieee-fraud-project/
+├── configs/                 # 实验配置：base、xgb、rf、lr、woe_lr
+├── data/
+│   ├── raw/                 # 原始数据，不纳入版本控制
+│   ├── interim/             # 中间数据
+│   └── processed/           # 预处理后的 parquet 数据
+├── notebooks/               # EDA、特征探索、IV 分析、解释性展示
+├── outputs/                 # 模型、指标、预测、SHAP、日志等输出
+├── scripts/                 # 命令行入口脚本
+├── src/fraud_detection/     # 核心 Python 包
+├── tests/                   # 单元测试
+├── pyproject.toml           # Python 包与测试配置
+└── requirements*.txt        # 分层依赖文件
+```
+
+核心优势：
+
+- **Modular pipeline**：数据、特征、IV、模型、评估、解释分别封装为模块。
+- **Reproducible experiments**：通过 `configs/*.yaml` 固定实验参数。
+- **Script-first workflow**：正式结果由脚本生成，Notebook 主要用于展示和复核。
+- **Test coverage**：`tests/` 覆盖数据处理、特征映射、IV 计算和评估指标。
+- **Traceable outputs**：训练过程写入 `outputs/logs/training.log`，结果统一保存在 `outputs/`。
 
 ## 项目流程
+
+```mermaid
+flowchart LR
+    A[Raw Data<br/>原始交易数据] --> B[prepare_data.py<br/>时间切分与预处理]
+    B --> C[train.py<br/>IV / 特征筛选 / 模型训练]
+    C --> D[evaluate.py<br/>指标汇总]
+    C --> E[explain.py<br/>SHAP解释]
+    D --> F[notebooks<br/>结果展示]
+    E --> F
+```
+
+完整流程包括：
 
 1. 环境准备
 2. 数据放置与预处理
@@ -43,13 +128,13 @@ cd "D:\Vs code\ieee-fraud-project"
 
 ## 数据准备
 
-将 Kaggle IEEE-CIS Fraud Detection 原始 CSV 文件放在：
+将原始交易数据 CSV 文件放在：
 
 ```text
 data/raw/ieee-fraud-detection/
 ```
 
-训练流程至少需要：
+当前实验使用 IEEE-CIS Fraud Detection 数据格式，训练流程至少需要：
 
 - `train_transaction.csv`
 - `train_identity.csv`
