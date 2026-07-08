@@ -24,6 +24,7 @@ features:
   add_missing_indicators: true
   add_time_features: true
   add_amount_log: true
+  candidate_policy: data_dictionary_risk_fields
 
 iv:
   bins: 10
@@ -65,6 +66,10 @@ models:
     preprocessing:
       near_zero_variance_threshold: 0.0
       correlation_threshold: 0.80
+      vif_enabled: true
+      vif_threshold: 10.0
+      vif_max_iter: 200
+      vif_sample_size: 100000
   random_forest:
     enabled: true
     params:
@@ -75,6 +80,7 @@ models:
       n_jobs: -1
   xgboost:
     enabled: true
+    auto_scale_pos_weight: true
     params:
       n_estimators: 2000
       max_depth: 4

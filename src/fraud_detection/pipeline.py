@@ -13,7 +13,7 @@ from . import features as feature_mod
 from . import iv as iv_mod
 from . import models as model_mod
 from .evaluate import classification_metrics, find_best_threshold, topk_evaluation
-from .preprocessing import correlation_filter, near_zero_variance_filter
+from .preprocessing import correlation_filter, near_zero_variance_filter, vif_filter
 from .utils import ensure_dir, resolve_path, save_json
 
 
@@ -69,7 +69,7 @@ def prepare_base_features(config: dict):
         config["features"].get("high_missing_threshold", 0.95),
     )
     force_categorical = feature_mod.categorical_features(iv_features)
-    risk_system = feature_mod.build_feature_system(train, target)
+    risk_system = feature_mod.build_feature_system(train, target, iv_features)
     return train, valid, test, iv_features, force_categorical, risk_system
 
 
@@ -88,14 +88,38 @@ def prepare_woe_lr_matrices(config: dict, train, valid, test, selected_features,
     X_test = encoder.transform(test, selected_features)
     model_cfg = config["models"].get("woe_lr", {})
     prep_cfg = model_cfg.get("preprocessing", {})
+    filter_rows = []
+    initial_features = list(X_train.columns)
+
     kept, selector = near_zero_variance_filter(X_train, prep_cfg.get("near_zero_variance_threshold", 0.0))
+    variance_drop = [col for col in X_train.columns if col not in kept]
+    filter_rows.extend({"Step": "near_zero_variance", "Feature": col, "Action": "drop"} for col in variance_drop)
     X_train = X_train[kept]
     X_valid = X_valid[kept]
     X_test = X_test[kept]
+
     kept = correlation_filter(X_train, prep_cfg.get("correlation_threshold", 0.8))
+    corr_drop = [col for col in X_train.columns if col not in kept]
+    filter_rows.extend({"Step": "correlation", "Feature": col, "Action": "drop"} for col in corr_drop)
     X_train = X_train[kept]
     X_valid = X_valid[kept]
     X_test = X_test[kept]
+
+    vif_report = pd.DataFrame()
+    if prep_cfg.get("vif_enabled", True):
+        kept, vif_report = vif_filter(
+            X_train,
+            threshold=prep_cfg.get("vif_threshold", 10.0),
+            max_iter=prep_cfg.get("vif_max_iter", 200),
+            sample_size=prep_cfg.get("vif_sample_size", 100_000),
+            random_state=config["project"].get("random_state", 42),
+        )
+        vif_drop = [col for col in X_train.columns if col not in kept]
+        filter_rows.extend({"Step": "vif", "Feature": col, "Action": "drop"} for col in vif_drop)
+        X_train = X_train[kept]
+        X_valid = X_valid[kept]
+        X_test = X_test[kept]
+
     return {
         "X_train": X_train,
         "X_valid": X_valid,
@@ -105,6 +129,15 @@ def prepare_woe_lr_matrices(config: dict, train, valid, test, selected_features,
         "y_test": test[target].astype(int),
         "encoder": encoder,
         "features": kept,
+        "filter_summary": {
+            "initial_features": len(initial_features),
+            "near_zero_variance_drop_features": len(variance_drop),
+            "correlation_drop_features": len(corr_drop),
+            "vif_drop_features": len([row for row in filter_rows if row["Step"] == "vif"]),
+            "final_features": len(kept),
+        },
+        "filter_detail": pd.DataFrame(filter_rows),
+        "vif_report": vif_report,
     }
 
 
@@ -207,13 +240,32 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
         if config["models"].get("woe_lr", {}).get("enabled", False):
             logger.info("Scheme %s preparing WOE-LR matrices.", scheme_name)
             woe_data = prepare_woe_lr_matrices(config, train, valid, test, selected, force_categorical)
-            pd.DataFrame({"Feature": woe_data["features"]}).to_csv(
+            woe_feature_info = pd.DataFrame(
+                {
+                    "Feature": woe_data["features"],
+                    "BaseFeature": [feature_mod.get_base_feature_name(col) for col in woe_data["features"]],
+                    "FeatureCategory": [feature_mod.infer_feature_category(col) for col in woe_data["features"]],
+                    "RiskMechanism": [feature_mod.infer_risk_mechanism(col) for col in woe_data["features"]],
+                }
+            )
+            woe_feature_info.to_csv(
                 scheme_dir / "tables" / "woe_feature_info.csv", index=False, encoding="utf-8-sig"
             )
+            woe_data["filter_detail"].to_csv(
+                scheme_dir / "tables" / "woe_filter_detail.csv", index=False, encoding="utf-8-sig"
+            )
+            woe_data["vif_report"].to_csv(
+                scheme_dir / "tables" / "woe_vif_report.csv", index=False, encoding="utf-8-sig"
+            )
             model_mod.save_model(
-                {"encoder": woe_data["encoder"], "features": woe_data["features"]},
+                {
+                    "encoder": woe_data["encoder"],
+                    "features": woe_data["features"],
+                    "filter_summary": woe_data["filter_summary"],
+                },
                 scheme_dir / "models" / "woe_preprocess.joblib",
             )
+            save_json(woe_data["filter_summary"], scheme_dir / "tables" / "woe_filter_summary.json")
 
         scheme_rows.append(
             {
@@ -230,6 +282,12 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
             if matrices is None:
                 continue
             params = model_cfg.get("params", {})
+            if model_name == "xgboost" and model_cfg.get("auto_scale_pos_weight", False):
+                pos_count = float(matrices["y_train"].sum())
+                neg_count = float(len(matrices["y_train"]) - pos_count)
+                if pos_count > 0:
+                    params = dict(params)
+                    params["scale_pos_weight"] = neg_count / pos_count
             model = model_mod.make_model(model_name, params, config["project"].get("random_state", 42))
             logger.info("Scheme %s model %s training started.", scheme_name, model_name)
             if model_name == "xgboost":

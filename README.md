@@ -2,50 +2,208 @@
 
 本项目面向 **Online Transaction Fraud Risk Modeling** 场景，构建一套可复现、模块化、可解释的交易欺诈识别流程。项目重点不是单一 Notebook 实验，而是将数据处理、风险特征体系、WOE-IV 特征筛选、模型训练、评估与 SHAP 解释整合为一条工程化流水线。
 
-项目当前使用 IEEE-CIS Fraud Detection 数据作为实验数据来源，用于模拟在线交易中的欺诈风险识别任务。
+项目使用公开在线交易欺诈数据进行实验验证，用于模拟真实交易风险识别场景。当前实验采用 IEEE-CIS Fraud Detection 数据。
 
-## 项目目标
+## 项目价值
 
-- 构建面向在线交易场景的风险特征体系。
-- 使用 WOE-IV 方法进行特征筛选与风险信号识别。
-- 训练 WOE-LR、Random Forest、XGBoost 等模型，并比较不同特征方案的效果。
-- 通过 AUC、PR-AUC、KS、F1、TopK Lift 等指标评估模型表现。
-- 使用 TreeSHAP 分析模型判断依据，形成可解释的风险机制结论。
-- 将研究流程工程化，支持脚本化复现、配置化实验和 Notebook 展示。
+- 从交易、身份、设备、行为、关联等维度构建互联网风控特征体系。
+- 使用 WOE-IV 方法识别有效风险信号，并设计多种特征筛选方案。
+- 训练 WOE-LR、Random Forest、XGBoost 等模型，比较模型在时间切分数据上的泛化表现。
+- 使用 AUC、PR-AUC、KS、F1、TopK Lift 等指标评估欺诈识别效果。
+- 使用 TreeSHAP 将模型结果解释到特征和风险机制层面。
+- 通过脚本、配置、测试和日志形成可复现的工程化流程。
 
-## 风险建模思路
+## 风险特征体系
 
-本项目将原始交易字段组织为风险特征体系，再通过 IV、模型表现和 SHAP 解释分析风险信号与欺诈预测之间的关系。
+在线交易欺诈通常不是单一字段异常，而是多个风险维度共同作用。本项目在代码中保留 `FeatureCategory` 和 `RiskMechanism` 两层标签，同时在业务表达上增加风险维度层，便于解释建模结果。
+
+| 风险维度 | 业务含义 | 典型字段或字段组 | 对应风险机制 |
+| --- | --- | --- | --- |
+| 交易风险 | 金额、相对交易时段、商品类型异常 | `hour`、`TransactionAmt_log`、`ProductCD` | 交易场景异常 |
+| 身份风险 | 邮箱、银行卡、地址、距离代理和身份一致性 | `card1`-`card6`、`addr1`、`addr2`、`P_emaildomain`、`R_emaildomain`、`dist1`、`dist2`、`M*` | 支付身份与联系方式异常、身份一致性异常 |
+| 设备风险 | 设备指纹、浏览器、网络环境异常 | `id_*`、`DeviceType`、`DeviceInfo` | 设备网络与数字指纹异常 |
+| 行为风险 | 交易频率、时间间隔、聚合统计异常 | `C*`、`D*`、`V*` | 批量聚集与实体关联异常、行为时序节奏异常 |
+| 关联风险 | 实体关联、批量聚集和群体欺诈 | 交易计数字段、Vesta 聚合字段、支付身份字段组合 | 批量聚集与实体关联异常 |
+
+图中不同颜色表示不同风险归因维度：黄色为交易风险，蓝色为身份风险，紫色为设备风险，绿色为行为风险，红色为关联风险。
 
 ```mermaid
 flowchart TD
-    A[Online Transaction Data<br/>在线交易数据] --> B[Risk Features<br/>风险特征体系]
+    A["Online Transaction Data<br/>在线交易数据"] --> B["Risk Features<br/>风险特征体系"]
 
-    B --> C1[交易基础特征<br/>金额 / 时间 / 商品类型]
-    B --> C2[身份与支付代理特征<br/>银行卡 / 地址 / 邮箱]
-    B --> C3[设备与网络指纹特征<br/>设备 / 浏览器 / 身份字段]
-    B --> C4[行为统计与时序特征<br/>计数 / 时间差 / 聚合统计]
+    B --> C1["交易风险<br/>金额 / 时间 / 商品类型"]
+    B --> C2["身份风险<br/>银行卡 / 地址 / 邮箱 / 匹配一致性"]
+    B --> C3["设备风险<br/>设备指纹 / 浏览器 / 网络环境"]
+    B --> C4["行为风险<br/>交易频率 / 时间差 / 聚合统计"]
+    B --> C5["关联风险<br/>实体关联 / 批量聚集"]
 
-    C1 --> D[Risk Mechanism<br/>风险机制归纳]
+    C1 --> D["Risk Mechanism<br/>风险机制归纳"]
     C2 --> D
     C3 --> D
     C4 --> D
+    C5 --> D
 
-    D --> E[WOE-IV Feature Selection<br/>特征筛选]
-    E --> F[Fraud Prediction<br/>欺诈预测]
-    F --> G[Evaluation & SHAP Explanation<br/>评估与可解释性分析]
+    D --> E["WOE-IV Feature Selection<br/>特征筛选"]
+    E --> F["Fraud Prediction<br/>欺诈预测"]
+    F --> G["Evaluation & SHAP Explanation<br/>评估与可解释性分析"]
+
+    classDef transaction fill:#fff3cd,stroke:#d39e00,color:#4d3900;
+    classDef identity fill:#dbeafe,stroke:#2563eb,color:#0f2f66;
+    classDef device fill:#ede9fe,stroke:#7c3aed,color:#3b1a78;
+    classDef behavior fill:#dcfce7,stroke:#16a34a,color:#14532d;
+    classDef relation fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    classDef neutral fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    classDef output fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+
+    class C1 transaction;
+    class C2 identity;
+    class C3 device;
+    class C4 behavior;
+    class C5 relation;
+    class A,B,D,E neutral;
+    class F,G output;
 ```
 
-在代码中，风险体系主要体现在：
+### 字段分类与风险机制口径
 
-- `FeatureCategory`：特征类别，例如交易基础特征、身份代理特征、设备网络特征、行为统计特征。
-- `RiskMechanism`：风险机制，例如交易场景异常、身份一致性异常、设备网络异常、批量聚集异常。
+本项目在代码中使用两层标签描述风险信号：`FeatureCategory` 表示字段在数据结构上的类别，`RiskMechanism` 表示该类字段在风控解释中的风险归因。第三张风险机制归因图正是按照 `RiskMechanism` 聚合 SHAP 贡献得到的。
 
-相关逻辑位于：
+| 字段分类 `FeatureCategory` | 字段范围 | 业务风险维度 | 风险机制 `RiskMechanism` | 解释口径 |
+| --- | --- | --- | --- | --- |
+| 交易基础特征 | `hour`、`TransactionAmt_log`、`ProductCD` | 交易风险 | 交易场景异常 | 相对交易时段、金额强度和商品类型等交易场景与正常交易模式不一致。 |
+| 支付工具与身份代理特征 | `card1`-`card6`、`addr1`、`addr2`、`P_emaildomain`、`R_emaildomain`、`dist1`、`dist2` | 身份风险、关联风险 | 支付身份与联系方式异常 | 支付卡、地址、邮箱域名、距离代理字段等身份与联系方式信息携带风险差异。 |
+| 行为计数统计特征 | `C1`-`C14` | 行为风险、关联风险 | 批量聚集与实体关联异常 | 同一实体或相近实体出现高频交易、集中交易、批量尝试等信号。 |
+| Vesta 聚合统计特征 | `V1`-`V339` | 行为风险、关联风险 | 批量聚集与实体关联异常 | 匿名聚合统计字段反映复杂行为聚集、实体关联和历史统计差异。 |
+| 行为时间差特征 | `D1`-`D15` | 行为风险 | 行为时序节奏异常 | 交易间隔、历史活跃周期或时间节奏与正常用户不一致。 |
+| 身份匹配一致性特征 | `M1`-`M9` | 身份风险 | 身份一致性异常 | 交易身份信息之间的匹配关系异常，可能代表身份冒用或资料不一致。 |
+| 设备网络与数字指纹特征 | `id_01`-`id_38`、`DeviceType`、`DeviceInfo` | 设备风险 | 设备网络与数字指纹异常 | 设备、浏览器、网络连接和数字指纹呈现异常组合；其中 `id_01`-`id_11` 按数值特征处理，`id_12`-`id_38` 按类别特征处理。 |
+| 其他特征 | 未被上述规则覆盖的字段 | 其他 | 其他风险信号 | 暂未归入明确业务机制，只作为补充信号保留。 |
+
+## Feature Dictionary
+
+| 字段族 | 示例字段 | 风险维度 | 建模含义 | 处理方式 |
+| --- | --- | --- | --- | --- |
+| 交易金额与相对时段 | `TransactionAmt_log`、`hour` | 交易风险 | 捕捉金额强度和相对交易时段异常 | `TransactionDT` 只用于时间切分和派生 `hour`，`TransactionAmt` 只用于生成 `TransactionAmt_log`，二者不直接进入主候选字段 |
+| 产品类型 | `ProductCD` | 交易风险 | 不同产品或交易场景可能具有不同欺诈率 | 类别编码、IV 分析 |
+| 支付卡、地址与距离代理 | `card1`-`card6`、`addr1`、`addr2`、`dist1`、`dist2` | 身份风险、关联风险 | 反映支付工具、地理或账单地址代理信息，以及距离漂移带来的身份代理异常 | 类别编码、数值填充、WOE 编码、树模型编码 |
+| 邮箱域名 | `P_emaildomain`、`R_emaildomain` | 身份风险 | 反映付款方和收款方联系方式风险 | 高频类别保留、低频合并 |
+| 行为计数 | `C1`-`C14` | 行为风险、关联风险 | 捕捉实体计数、交易聚集和批量行为 | 数值填充、IV 筛选、SHAP 解释 |
+| 时间差特征 | `D1`-`D15` | 行为风险 | 捕捉交易间隔、行为节奏和历史活跃差异 | 数值填充、IV 筛选 |
+| 身份匹配 | `M1`-`M9` | 身份风险 | 反映交易身份信息的一致性 | 类别编码、WOE 编码 |
+| Vesta 聚合字段 | `V1`-`V339` | 行为风险、关联风险 | 聚合统计和复杂行为信号 | 缺失率过滤、IV 筛选、树模型训练 |
+| 设备与身份字段 | `id_01`-`id_38`、`DeviceType`、`DeviceInfo` | 设备风险 | 捕捉设备、浏览器、网络连接和数字指纹异常 | `id_01`-`id_11` 数值填充，`id_12`-`id_38` 与设备字段做类别编码，保留高缺失字段的缺失指示变量 |
+
+候选字段采用数据字典驱动的风险字段体系，不直接把处理后数据表中的所有列放入模型。`TransactionDT` 用于时间切分和派生相对时段，`TransactionAmt` 用于生成 `TransactionAmt_log`，`relative_day` 作为时间位置辅助字段保留在预处理数据中，但不作为主建模候选字段。
+
+相关代码位于：
 
 ```text
 src/fraud_detection/features.py
 ```
+
+主要输出表：
+
+```text
+outputs/tables/risk_feature_system.csv
+outputs/iv_002_050/tables/model_feature_info.csv
+outputs/iv_002_050/shap/shap_mechanism_summary.csv
+```
+
+## 主要实验结论
+
+当前结果显示，XGBoost 在测试集上的整体表现明显优于 WOE-LR 和 Random Forest。以主解释方案 `iv_002_050` 为例，XGBoost 测试集指标如下：
+
+| 指标 | 数值 |
+| --- | ---: |
+| AUC | 0.8983 |
+| PR-AUC | 0.5064 |
+| KS | 0.6441 |
+| Precision | 0.5074 |
+| Recall | 0.4794 |
+| F1 | 0.4930 |
+| 验证集 F1 最优阈值 | 0.7950 |
+
+在高风险排序场景下，模型具有较强的欺诈捕获能力：
+
+| 策略覆盖范围 | 样本占比 | Precision | 欺诈捕获率 | Lift |
+| --- | ---: | ---: | ---: | ---: |
+| Top 1% | 1% | 0.8768 | 0.2517 | 25.19 |
+| Top 3% | 3% | 0.5322 | 0.4586 | 15.29 |
+| Top 5% | 5% | 0.3800 | 0.5459 | 10.92 |
+| Top 10% | 10% | 0.2416 | 0.6941 | 6.94 |
+
+这说明模型不仅可以做二分类判断，也适合用于风险排序、人工审核队列和分层处置策略。
+
+## 关键结果可视化
+
+SHAP 特征重要性显示，`C13`、`C1`、`TransactionAmt_log`、`C5`、`card6`、`P_emaildomain`、`card1`、`V70`、`card2`、`M4` 等字段是主方案中的关键风险信号。
+
+![SHAP Top Features](docs/assets/shap_importance_top30_by_category.png)
+
+SHAP summary 图进一步展示了主要特征在不同取值下对欺诈预测方向的影响。
+
+![SHAP Summary](docs/assets/shap_summary_top30.png)
+
+按风险机制汇总后的 SHAP 贡献可以用于风险归因，展示模型主要依赖哪些业务风险维度进行判断。
+
+![Risk Mechanism SHAP Share](docs/assets/risk_mechanism_shap_share.png)
+
+从风险机制汇总看，模型解释结果主要集中在：
+
+| 风险机制 | 解释性结论 |
+| --- | --- |
+| 批量聚集与实体关联异常 | 贡献占比最高，说明行为计数、聚合统计和实体关联类特征是主要欺诈信号。 |
+| 支付身份与联系方式异常 | 银行卡、邮箱、地址等身份代理字段对风险判断有明显贡献。 |
+| 行为时序节奏异常 | 时间差和交易节奏能够反映异常行为模式。 |
+| 交易场景异常 | 金额、商品类型和交易时段对风险识别有补充作用。 |
+| 设备网络与数字指纹异常 | 设备和身份字段提供环境层面的辅助风险信号。 |
+
+## 风险评分与策略模块分析
+
+当前项目已经具备风险评分和离线策略分析基础。模型输出的 `score` 可以理解为交易风险分，分数越高，模型认为欺诈风险越高。
+
+预测分数文件位于：
+
+```text
+outputs/iv_002_050/predictions/xgboost_predictions.csv
+```
+
+其中核心字段包括：
+
+- `y_true`：真实标签
+- `score`：模型输出风险分
+- `Split`：Train、Valid、Test 数据切分
+- `Scheme`：实验方案
+- `Model`：模型名称
+
+可以基于 `score` 构建如下策略分层：
+
+| 策略层级 | 分层方式 | 离线表现参考 | 建议处置 |
+| --- | --- | --- | --- |
+| 极高风险 | Top 1% 风险分 | Precision 0.8768，捕获约 25.17% 欺诈，Lift 25.19 | 强拦截、人工复核、延迟履约、强验证 |
+| 高风险 | Top 3% 风险分 | Precision 0.5322，捕获约 45.86% 欺诈，Lift 15.29 | 人工审核、二次认证、限制敏感操作 |
+| 中风险 | Top 5% 风险分 | Precision 0.3800，捕获约 54.59% 欺诈，Lift 10.92 | 短信验证、设备校验、交易限额 |
+| 观察风险 | Top 10% 风险分 | Precision 0.2416，捕获约 69.41% 欺诈，Lift 6.94 | 加强监控、进入灰名单、后验核查 |
+| 低风险 | Top 10% 以外 | 风险排序较低 | 正常放行 |
+
+也可以使用训练流程中自动选择的分类阈值：
+
+```text
+score >= 0.7950
+```
+
+该阈值来自验证集 F1 最优点，在测试集上对应：
+
+- Precision：0.5074
+- Recall：0.4794
+- F1：0.4930
+
+因此，本项目可以支持两类策略使用方式：
+
+1. **阈值策略**：适合需要给出是否欺诈判断的场景，例如 `score >= 0.7950` 判为高风险。
+2. **排序策略**：适合人工审核资源有限的场景，例如优先处理 Top 1%、Top 3%、Top 5% 的交易。
+
+实际业务上线时，还需要结合误杀成本、审核能力、交易金额、用户等级和实时反馈数据重新校准阈值。
 
 ## 工程化设计
 
@@ -58,6 +216,7 @@ ieee-fraud-project/
 │   ├── raw/                 # 原始数据，不纳入版本控制
 │   ├── interim/             # 中间数据
 │   └── processed/           # 预处理后的 parquet 数据
+├── docs/assets/             # README 展示图片
 ├── notebooks/               # EDA、特征探索、IV 分析、解释性展示
 ├── outputs/                 # 模型、指标、预测、SHAP、日志等输出
 ├── scripts/                 # 命令行入口脚本
@@ -74,6 +233,7 @@ ieee-fraud-project/
 - **Script-first workflow**：正式结果由脚本生成，Notebook 主要用于展示和复核。
 - **Test coverage**：`tests/` 覆盖数据处理、特征映射、IV 计算和评估指标。
 - **Traceable outputs**：训练过程写入 `outputs/logs/training.log`，结果统一保存在 `outputs/`。
+- **Model-specific preprocessing**：WOE-LR 使用近零方差、相关性和 VIF 过滤控制共线性；XGBoost 支持按训练集类别比例自动设置 `scale_pos_weight`。
 
 ## 项目流程
 
@@ -230,6 +390,9 @@ New-Item -ItemType Directory -Force outputs\notebooks
 - `outputs/<scheme>/models/*.joblib`：模型文件
 - `outputs/<scheme>/metrics/*.csv`：单方案模型评估指标
 - `outputs/<scheme>/predictions/*.csv`：预测分数
+- `outputs/<scheme>/tables/woe_filter_summary.json`：WOE-LR 特征过滤汇总
+- `outputs/<scheme>/tables/woe_filter_detail.csv`：WOE-LR 近零方差、相关性和 VIF 删除明细
+- `outputs/<scheme>/tables/woe_vif_report.csv`：WOE-LR VIF 迭代过滤报告
 - `outputs/<scheme>/shap/*.csv`：SHAP 解释性结果表
 - `outputs/<scheme>/shap/*.png`：SHAP 可视化图片
 

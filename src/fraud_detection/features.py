@@ -8,6 +8,51 @@ import pandas as pd
 TARGET = "isFraud"
 
 
+TRANSACTION_RISK_FEATURES = ["hour", "TransactionAmt_log", "ProductCD"]
+PAYMENT_IDENTITY_FEATURES = [
+    "card1",
+    "card2",
+    "card3",
+    "card4",
+    "card5",
+    "card6",
+    "addr1",
+    "addr2",
+    "P_emaildomain",
+    "R_emaildomain",
+    "dist1",
+    "dist2",
+]
+COUNT_FEATURES = [f"C{i}" for i in range(1, 15)]
+TIMEDELTA_FEATURES = [f"D{i}" for i in range(1, 16)]
+MATCH_FEATURES = [f"M{i}" for i in range(1, 10)]
+VESTA_FEATURES = [f"V{i}" for i in range(1, 340)]
+DEVICE_IDENTITY_FEATURES = ["DeviceType", "DeviceInfo"] + [f"id_{i:02d}" for i in range(1, 39)]
+
+DATA_DICTIONARY_FEATURES = (
+    TRANSACTION_RISK_FEATURES
+    + PAYMENT_IDENTITY_FEATURES
+    + COUNT_FEATURES
+    + TIMEDELTA_FEATURES
+    + MATCH_FEATURES
+    + VESTA_FEATURES
+    + DEVICE_IDENTITY_FEATURES
+)
+
+CATEGORICAL_BASE_FEATURES = {
+    "ProductCD",
+    "addr1",
+    "addr2",
+    "P_emaildomain",
+    "R_emaildomain",
+    "DeviceType",
+    "DeviceInfo",
+    *[f"card{i}" for i in range(1, 7)],
+    *MATCH_FEATURES,
+    *[f"id_{i:02d}" for i in range(12, 39)],
+}
+
+
 def get_base_feature_name(feature: str) -> str:
     for suffix in ("_is_missing", "_freq", "_woe"):
         if feature.endswith(suffix):
@@ -19,7 +64,7 @@ def infer_feature_category(feature: str) -> str:
     base = get_base_feature_name(feature)
     if base in {"TransactionDT", "relative_day", "hour", "TransactionAmt", "TransactionAmt_log", "ProductCD"}:
         return "交易基础特征"
-    if re.match(r"^card[1-6]$", base) or base in {"addr1", "addr2", "P_emaildomain", "R_emaildomain"}:
+    if base in PAYMENT_IDENTITY_FEATURES:
         return "支付工具与身份代理特征"
     if re.match(r"^C\d+$", base):
         return "行为计数统计特征"
@@ -31,8 +76,6 @@ def infer_feature_category(feature: str) -> str:
         return "Vesta聚合统计特征"
     if base.startswith("id_") or base in {"DeviceType", "DeviceInfo"}:
         return "设备网络与数字指纹特征"
-    if base in {"dist1", "dist2"}:
-        return "行为漂移距离特征"
     return "其他特征"
 
 
@@ -46,14 +89,14 @@ def infer_risk_mechanism(feature: str) -> str:
         "行为时间差特征": "行为时序节奏异常",
         "身份匹配一致性特征": "身份一致性异常",
         "设备网络与数字指纹特征": "设备网络与数字指纹异常",
-        "行为漂移距离特征": "行为漂移异常",
     }.get(category, "其他风险信号")
 
 
-def build_feature_system(df: pd.DataFrame, target: str = TARGET) -> pd.DataFrame:
+def build_feature_system(df: pd.DataFrame, target: str = TARGET, features: list[str] | None = None) -> pd.DataFrame:
     rows = []
-    for feature in df.columns:
-        if feature in {target, "TransactionID"}:
+    features = features or candidate_features(df, target)
+    for feature in features:
+        if feature in {target, "TransactionID"} or feature not in df.columns:
             continue
         rows.append(
             {
@@ -69,8 +112,7 @@ def build_feature_system(df: pd.DataFrame, target: str = TARGET) -> pd.DataFrame
 
 
 def candidate_features(df: pd.DataFrame, target: str = TARGET) -> list[str]:
-    excluded = {target, "TransactionID"}
-    return [col for col in df.columns if col not in excluded]
+    return [feature for feature in DATA_DICTIONARY_FEATURES if feature in df.columns and feature != target]
 
 
 def add_missing_indicators(
@@ -99,13 +141,10 @@ def add_missing_indicators(
 def categorical_features(features: list[str]) -> list[str]:
     cats = []
     for col in features:
+        if col.endswith("_is_missing"):
+            continue
         base = get_base_feature_name(col)
-        if (
-            base in {"ProductCD", "addr1", "addr2", "P_emaildomain", "R_emaildomain", "DeviceType", "DeviceInfo"}
-            or re.match(r"^card[1-6]$", base)
-            or re.match(r"^M\d+$", base)
-            or (base.startswith("id_") and base != "id_02")
-        ):
+        if base in CATEGORICAL_BASE_FEATURES:
             cats.append(col)
     return cats
 
