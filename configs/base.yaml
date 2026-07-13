@@ -31,6 +31,7 @@ iv:
   max_categories: 30
   min_iv: 0.02
   max_iv: 0.50
+  cv_n_splits: 5
 
 training:
   schemes:

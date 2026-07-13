@@ -75,15 +75,16 @@ def prepare_base_features(config: dict):
 
 def prepare_woe_lr_matrices(config: dict, train, valid, test, selected_features, force_categorical):
     target = config["project"].get("target", "isFraud")
-    encoder = iv_mod.fit_woe_encoder(
+    n_splits = config["iv"].get("cv_n_splits", 5)
+    X_train, encoder = iv_mod.cv_woe_encode_train(
         train,
         selected_features,
         [f for f in force_categorical if f in selected_features],
         target=target,
         bins=config["iv"].get("bins", 10),
         max_categories=config["iv"].get("max_categories", 30),
+        n_splits=n_splits,
     )
-    X_train = encoder.transform(train, selected_features)
     X_valid = encoder.transform(valid, selected_features)
     X_test = encoder.transform(test, selected_features)
     model_cfg = config["models"].get("woe_lr", {})
@@ -238,7 +239,7 @@ def run_training(config: dict, output_dir: str | Path = "outputs") -> None:
         )
         woe_data = None
         if config["models"].get("woe_lr", {}).get("enabled", False):
-            logger.info("Scheme %s preparing WOE-LR matrices.", scheme_name)
+            logger.info("Scheme %s preparing WOE-LR matrices with %d-fold TimeSeriesSplit CV WOE.", scheme_name, config["iv"].get("cv_n_splits", 5))
             woe_data = prepare_woe_lr_matrices(config, train, valid, test, selected, force_categorical)
             woe_feature_info = pd.DataFrame(
                 {
